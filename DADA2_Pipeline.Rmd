@@ -1,0 +1,184 @@
+---
+title: "DADA2_Assignment3"
+author: "Claudia"
+date: "08/11/2021"
+output: html_document
+---
+
+#Set working directory to where your files are saved/where you want to work. 
+```{r}
+setwd ("~/Desktop/ENVS_BINF/Assignment 3/")
+```
+
+#Load in libraries required for DADA2 
+#DADA2 must already be installed
+```{r}
+library(dada2); packageVersion("dada2")
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(ggplot2); packageVersion("ggplot2")
+```
+
+#Change path to where your data is located. 
+```{r}
+path <- "~/Desktop/ENVS_BINF/Assignment 3/Sequences" 
+list.files(path)
+```
+
+#Tell DADA what the forward and reverse reads are. You need to know what the file format names are for your file (change the pattern="" section). 
+```{r}
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+sample.names
+```
+
+#visualize the quality profiles. Manually stop and look at the data. 
+```{r}
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+```
+
+#Assign filenames to the filtered files 
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+#here we actually filter and we choose the length at which to truncate the reads. truncLen=c(forward read cutoff#, reverse read cutoff#)
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(260,210),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE) # On Windows set multithread=FALSE
+head(out)
+```
+
+#learn the error rates of your reads. Visualize the estimated error rates.
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+plotErrors(errF, nominalQ=TRUE)
+```
+
+#how many different sequences do we have in each Sample?
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+```{r}
+dadaFs
+```
+
+#merge paired-end reads 
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+mergers
+```
+
+## Inspect distribution of sequence lengths
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+```
+
+#Sequences that are much longer or shorter than expected may be the result of non-specific priming. You can remove non-target-length sequences from your sequence table 
+```{r}
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 396:420]
+```
+
+#Remove chimeras
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+#As a final check of our progress, we’ll look at the number of reads that made it through each step in the pipeline
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+#Assign taxonomy using the Silva Database 
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "~/Desktop/ENVS_BINF/DADA2/silva_nr99_v138.1_train_set.fa", multithread=TRUE)
+```
+
+```{r}
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+
+#We now construct a phyloseq object directly from the dada2 outputs.
+```{r}
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               tax_table(taxa))
+ps
+```
+
+#Transform data to plot relative abundance.
+```{r}
+relative<- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+relative
+```
+
+
+#Graph relative abundance by phylum
+```{r}
+Phylum_graph <- plot_bar(relative, fill="Phylum", title="Relative Abundance of Phyla in Pumice Samples") +ylab("Relative Abundance")
+Phylum_graph
+```
+
+#Print graph to a pdf file
+```{r}
+pdf("Phylum_graph.pdf")
+Phylum_graph
+dev.off()
+```
+
+#Graph relative abundance by Order
+```{r}
+Order_graph <-plot_bar(relative, fill="Order", title="Relative Abundance of Orders in Pumice Samples") +ylab("Relative Abundance") + theme(legend.position = "right") + guides(fill=guide_legend(ncol=2))
+Order_graph
+```
+#Export graph as pdf
+```{r}
+pdf("Order_graph.pdf", width=40, height=50)
+Order_graph
+dev.off()
+```
+
+#Another option to export graphs
+```{r}
+ggsave("order_graph_gg.jpeg", plot=Order_graph, width=10, height=20, limitsize = FALSE )
+```
+
+
+#attempting to find shared ASVs
+```{r}
+#filter_taxa(ps, function(x) sum(x >= 1) == (2), TRUE)
+#commonASVs = filter_taxa(ps, , TRUE)
+#otu_table(commonASVs)
+
+#otu_table(ps)[1:4, 1:5]
+#merged<-merge_samples(ps, sample_names)
+#filter<-filter_taxa(ps, function(x) sum(x > 1) >= (0*length(x)), TRUE)
+#filter
+#otu_table(filter)[1:4, 1:5]
+```
+#```{r}
+#write.table(tax_table(ps), file="tax_output.csv")
+#```
